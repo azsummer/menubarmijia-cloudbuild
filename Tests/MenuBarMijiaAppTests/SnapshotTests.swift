@@ -1,0 +1,565 @@
+import Testing
+import Foundation
+import SwiftUI
+import AppKit
+import SnapshotTesting
+@testable import MijiaCore
+@testable import MenuBarMijiaApp
+
+/// UI snapshots for the menu-bar panel and the five device-card families (#46).
+///
+/// Two-phase baseline: CI first runs `SNAPSHOT_RECORD=1 swift test --filter SnapshotTests`, which
+/// writes PNGs into `Tests/MenuBarMijiaAppTests/__Snapshots__/SnapshotTests/`; those files are then
+/// committed. SnapshotTesting also reports "Record mode is on" as a failure for that run, so the
+/// record job is expected to exit non-zero while still producing every baseline. Later runs compare
+/// against them; on a mismatch the new bitmap is written under `$SNAPSHOT_ARTIFACTS`/SnapshotTests
+/// (or `$TMPDIR/SnapshotTests`) and the diff command is printed in the failure message.
+///
+/// The renderer is fed fixed demo data and the accessibility "reduce motion" / "reduce transparency"
+/// switches, so animations and materials cannot make two runs differ. The suite is serialized
+/// because it changes `UserDefaults.standard` (the panel reads skin/appearance through
+/// `@AppStorage`) and `L10n.currentLanguage`.
+@MainActor
+@Suite(.serialized)
+struct SnapshotTests {
+    private var recordMode: SnapshotTestingConfiguration.Record {
+        ProcessInfo.processInfo.environment["SNAPSHOT_RECORD"] == "1" ? .all : .missing
+    }
+
+    // MARK: - Panel: one system look (Chinese, light, single column)
+
+    @Test("Panel renders in the system look")
+    func panelSnapshot() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+
+        UserDefaults.standard.set(AppAppearance.system.rawValue, forKey: AppAppearance.storageKey)
+
+        assertRendered(
+            snapshotReady(ControlCenterPanel(store: fixture.store)),
+            size: CGSize(width: 376, height: 560),
+            named: "panel-zh-light"
+        )
+    }
+
+    @Test("Panel shows the expired Mi session banner")
+    func panelExpiredMiSessionSnapshot() async throws {
+        let fixture = try await SnapshotFixture(
+            miSession: MiSession(
+                userId: "42",
+                cUserId: "c",
+                ssecurity: "c2VjcmV0",
+                serviceToken: "tok",
+                expiresAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        )
+        defer { fixture.restore() }
+
+        UserDefaults.standard.set(AppAppearance.system.rawValue, forKey: AppAppearance.storageKey)
+
+        assertRendered(
+            snapshotReady(ControlCenterPanel(store: fixture.store)),
+            size: CGSize(width: 376, height: 560),
+            named: "panel-mi-session-expired-zh-light"
+        )
+    }
+
+    @Test("Panel asks before sending the HA token over public plain http, and keeps the declined reason", arguments: [
+        (HAPlaintextPrompt.asking("http://203.0.113.5:8123"), "panel-ha-plaintext-asking-zh-light"),
+        (HAPlaintextPrompt.declined("http://203.0.113.5:8123"), "panel-ha-plaintext-declined-zh-light"),
+    ])
+    func panelHAPlaintextSnapshot(prompt: HAPlaintextPrompt, name: String) async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+
+        UserDefaults.standard.set(AppAppearance.system.rawValue, forKey: AppAppearance.storageKey)
+        fixture.store.haPlaintextPrompt = prompt
+
+        assertRendered(
+            snapshotReady(ControlCenterPanel(store: fixture.store)),
+            size: CGSize(width: 376, height: 560),
+            named: name
+        )
+    }
+
+    // MARK: - Room order (#146)
+
+    @Test("The room-order list renders over the dashboard with 16 rooms")
+    func roomOrderSnapshot() async throws {
+        let fixture = try await SnapshotFixture(roomCount: 16, editMode: .roomOrder)
+        defer { fixture.restore() }
+
+        UserDefaults.standard.set(AppAppearance.system.rawValue, forKey: AppAppearance.storageKey)
+
+        assertRendered(
+            snapshotReady(ControlCenterPanel(store: fixture.store)),
+            size: CGSize(width: 376, height: 560),
+            named: "panel-room-order-zh-light"
+        )
+
+        // The drag needs the real backing scroll view: without it auto-scroll never runs and the
+        // pointer-to-row mapping loses the scroll offset (found in review, guarded here).
+        let scrollView = try #require(
+            RoomOrderScrollProbe.lastResolvedScrollView,
+            "the room-order list must hand the drag its NSScrollView"
+        )
+        let document = try #require(scrollView.documentView)
+        #expect(
+            document.frame.height > scrollView.contentView.bounds.height,
+            "16 rooms must overflow the list so the drag can scroll"
+        )
+    }
+
+    // MARK: - Device cards: light / climate / plug / sensor / TV
+
+    @Test("Five device card families render")
+    func deviceCardSnapshots() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+        let light = try #require(fixture.store.devices.first { device in
+            if case .light = device.kind { return true } else { return false }
+        })
+        let climate = try #require(fixture.store.devices.first { device in
+            if case .climate = device.kind { return true } else { return false }
+        })
+        let plug = try #require(fixture.store.devices.first { device in
+            if case .plug = device.kind { return true } else { return false }
+        })
+        let sensor = try #require(fixture.store.devices.first { device in
+            if case .sensor = device.kind { return true } else { return false }
+        })
+        let tv = try #require(fixture.store.devices.first { device in
+            if case .tv = device.kind { return true } else { return false }
+        })
+
+        let cards: [(String, SmartDevice)] = [
+            ("light", light),
+            ("climate", climate),
+            ("plug", plug),
+            ("sensor", sensor),
+            ("tv", tv)
+        ]
+
+        for (name, device) in cards {
+            let view = snapshotReady(
+                DeviceCardView(device: device, store: fixture.store, showRoomBadge: true)
+                    .padding(8)
+                    .frame(width: 360)
+            )
+            assertRendered(
+                view,
+                size: CGSize(width: 376, height: 140),
+                named: "card-\(name)-zh-light"
+            )
+        }
+    }
+
+    @Test("Climate card wears its tinted platter when on")
+    func climateOnCardSnapshot() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+        var climate = try #require(fixture.store.devices.first { device in
+            if case .climate = device.kind { return true } else { return false }
+        })
+        await fixture.store.togglePrimary(climate)?.value
+        climate = try #require(fixture.store.devices.first { $0.id == climate.id })
+        #expect(climate.isActiveOn, "MockHomeProvider should apply the power toggle")
+
+        assertRendered(
+            snapshotReady(
+                DeviceCardView(device: climate, store: fixture.store, showRoomBadge: true)
+                    .padding(8)
+                    .frame(width: 360)
+            ),
+            size: CGSize(width: 376, height: 140),
+            named: "card-climate-on-zh-light"
+        )
+        assertRendered(
+            snapshotReady(
+                DeviceCardView(device: climate, store: fixture.store, showRoomBadge: true)
+                    .padding(8)
+                    .frame(width: 360),
+                scheme: .dark
+            ),
+            size: CGSize(width: 376, height: 140),
+            named: "card-climate-on-zh-dark",
+            scheme: .dark
+        )
+    }
+
+    @Test("Settings remain readable in light and dark appearances")
+    func settingsSnapshots() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+        for tab in [SettingsTab.general, .connection, .assistant, .appearance, .privacy, .about] {
+            for scheme in [ColorScheme.light, .dark] {
+                assertRendered(
+                    SettingsWindowView(store: fixture.store, selectedTab: tab)
+                        .environment(\.colorScheme, scheme)
+                        .environment(\.reduceMotionOverride, true)
+                        .environment(\.reduceTransparencyOverride, true),
+                    size: CGSize(width: 780, height: 680),
+                    named: "settings-\(tab.rawValue)-\(scheme == .dark ? "dark" : "light")",
+                    scheme: scheme
+                )
+            }
+        }
+    }
+
+    @Test("Settings capsule fits English at minimum window size with glass enabled")
+    func settingsCapsuleVariants() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+        for language in [AppLanguage.zhHans, .en] {
+            L10n.currentLanguage = language
+            fixture.store.appLanguagePreference = AppLanguagePreference(language)
+            for scheme in [ColorScheme.light, .dark] {
+                assertRendered(
+                    SettingsWindowView(store: fixture.store, selectedTab: .privacy)
+                        .environment(\.colorScheme, scheme)
+                        .environment(\.reduceMotionOverride, true)
+                        .environment(\.reduceTransparencyOverride, false),
+                    size: CGSize(width: 740, height: 600),
+                    named: "settings-capsule-\(language == .en ? "en" : "zh")-\(scheme == .dark ? "dark" : "light")",
+                    scheme: scheme
+                )
+            }
+        }
+    }
+
+    @Test("Settings stay proportional in wide windows and with motion enabled")
+    func settingsWideWindows() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+        for width: CGFloat in [900, 1200] {
+            for scheme in [ColorScheme.light, .dark] {
+                assertRendered(
+                    SettingsWindowView(store: fixture.store)
+                        .environment(\.colorScheme, scheme)
+                        .environment(\.reduceMotionOverride, false)
+                        .environment(\.reduceTransparencyOverride, false),
+                    size: CGSize(width: width, height: 680),
+                    named: "settings-wide-\(Int(width))-\(scheme == .dark ? "dark" : "light")",
+                    scheme: scheme
+                )
+            }
+        }
+    }
+
+    @Test("Panel supports dark, compact and expanded controls")
+    func panelInteractionStates() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+        for compact in [false, true] {
+            fixture.store.isCompactGridMode = compact
+            assertRendered(
+                snapshotReady(ControlCenterPanel(store: fixture.store), scheme: .dark),
+                size: CGSize(width: 376, height: 560),
+                named: compact ? "panel-compact-dark" : "panel-dark",
+                scheme: .dark
+            )
+        }
+        let light = try #require(fixture.store.devices.first { if case .light = $0.kind { true } else { false } })
+        fixture.store.expandedDeviceId = light.id
+        for scheme in [ColorScheme.light, .dark] {
+            assertRendered(
+                snapshotReady(DeviceCardView(device: light, store: fixture.store, showRoomBadge: true).padding(8), scheme: scheme),
+                size: CGSize(width: 376, height: 260),
+                named: "expanded-light-\(scheme == .dark ? "dark" : "light")",
+                scheme: scheme
+            )
+        }
+    }
+
+    // MARK: - Non-visual guards for the appearance work (#51) and tooltip (#54)
+
+    @Test("On and off tiles never share the same ink or fill")
+    func platterContrastHoldsInBothSchemes() {
+        let lit = TileSurface(isActive: true, scheme: .light)
+        let quiet = TileSurface(isActive: false, scheme: .light)
+        #expect(lit.ink == PanelLook.platterInk)
+        #expect(quiet.ink == .primary)
+        #expect(lit.secondaryInk == PanelLook.platterInk.opacity(0.55))
+        #expect(quiet.secondaryInk == .secondary)
+        // The platter keeps a defined hairline in light mode; wells get the quieter one.
+        #expect(lit.hairline != quiet.hairline)
+
+        // A tinted lit surface is dark blue glass in dark mode, so it takes white ink and the
+        // family hairline instead of the platter rules.
+        let darkTinted = TileSurface(isActive: true, tint: DesignTokens.Orb.climate, scheme: .dark)
+        #expect(darkTinted.ink == .white)
+        #expect(darkTinted.ink != lit.ink)
+        #expect(darkTinted.secondaryInk == .white.opacity(0.62))
+        #expect(darkTinted.hairline != lit.hairline)
+
+        // Dark mode never puts a white platter under the window's ink: every lit surface there is
+        // dark glass, so it keeps white ink instead of the light-mode platter ink.
+        let darkLit = TileSurface(isActive: true, scheme: .dark)
+        #expect(darkLit.ink == .white)
+        #expect(darkLit.secondaryInk == .white.opacity(0.62))
+        #expect(darkLit.ink != lit.ink)
+
+        // The bright platter is the only surface that owns the fixed dark ink, and it exists in
+        // light mode only. If a future fill change reintroduces a white tile in dark mode, this
+        // pairing breaks before the ink can go white-on-white.
+        #expect(lit.isBrightPlatter)
+        #expect(!quiet.isBrightPlatter)
+        #expect(!darkLit.isBrightPlatter)
+        #expect(!darkTinted.isBrightPlatter)
+    }
+
+    @Test("Scene icons map to one visual category per family")
+    func sceneVisualCategoriesMapFromSymbols() {
+        // Quick actions own their category outright; no symbol parsing involved.
+        #expect(QuickAction.lightsOff.visualCategory == .light)
+        #expect(QuickAction.softNightLight.visualCategory == .night)
+        #expect(QuickAction.climateSleepOff.visualCategory == .climate)
+        // Externally supplied scene icons resolve through the centralised keyword map.
+        #expect(SceneVisualCategory(iconSymbol: "moon.stars.fill") == .night)
+        #expect(SceneVisualCategory(iconSymbol: "wind.snow") == .climate)
+        #expect(SceneVisualCategory(iconSymbol: "drop.fill") == .water)
+        #expect(SceneVisualCategory(iconSymbol: "flame.fill") == .heat)
+        #expect(SceneVisualCategory(iconSymbol: "tv.fill") == .media)
+        // Unknown symbols land on the warm default instead of vanishing.
+        #expect(SceneVisualCategory(iconSymbol: "sparkles") == .light)
+    }
+
+    @Test("Menu-bar tooltip summarises devices, temperature and backend")
+    func menuBarSummaryDescribesCurrentState() async throws {
+        let fixture = try await SnapshotFixture()
+        defer { fixture.restore() }
+
+        let text = MenuBarStatusSummary.text(for: fixture.store)
+        #expect(text.hasPrefix("MenuBarMijia · "))
+        #expect(text.contains("台开启"))
+        #expect(text.contains("已连接 Home Assistant"))
+    }
+
+    // MARK: - Rendering switches
+
+    private func snapshotReady<V: View>(_ view: V, scheme: ColorScheme = .light) -> some View {
+        view
+            .environment(\.colorScheme, scheme)
+            .environment(\.reduceMotionOverride, true)
+            .environment(\.reduceTransparencyOverride, true)
+            .transaction { transaction in
+                transaction.disablesAnimations = true
+            }
+    }
+
+    /// SnapshotTesting only ships the SwiftUI `.image(layout:)` strategy for iOS/tvOS, so macOS
+    /// renders through an `NSHostingView` inside a borderless window and snapshots the NSView.
+    private func assertRendered<V: View>(
+        _ view: V,
+        size: CGSize,
+        named name: String,
+        scheme: ColorScheme = .light,
+        file: StaticString = #filePath,
+        testName: String = #function
+    ) {
+        // `swift test` does not launch an app; AppKit still needs its shared application object
+        // before offscreen windows and hosting views can be created.
+        _ = NSApplication.shared
+
+        // A control that holds focus must not draw its ring into the bitmap (#323).
+        let hosting = NSHostingView(rootView: view.focusEffectDisabled())
+        hosting.frame = NSRect(origin: .zero, size: size)
+
+        let window = SnapshotWindow.make(size: size)
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        window.contentView = hosting
+
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(size.width),
+            pixelsHigh: Int(size.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            Issue.record("Could not create a 1x snapshot bitmap")
+            return
+        }
+        bitmap.size = size
+        SnapshotWindow.prepareForCapture(window)
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        let image = NSImage(size: size)
+        image.addRepresentation(bitmap)
+        assertSnapshot(
+            of: image,
+            as: .image,
+            named: name,
+            record: recordMode,
+            file: file,
+            testName: testName
+        )
+
+        window.contentView = nil
+        window.orderOut(nil)
+    }
+}
+
+/// A loaded store over the built-in virtual home, with a fixed language and the standard-defaults
+/// keys the panel reads through `@AppStorage`.
+@MainActor
+private struct SnapshotFixture {
+    struct MissingDefaults: Error {}
+
+    let store: HomeStore
+    private let previousAppearance: String?
+    private let previousTemperatureUnit: String?
+    private let previousLanguage: AppLanguage
+    private let previousRoomOrder: String?
+    private let previousRoomAliases: String?
+
+    /// - Parameters:
+    ///   - roomCount: builds a home with that many rooms instead of the demo's three, so the
+    ///     room-order list can be rendered at the scale it was designed for (#146).
+    ///   - editMode: opens the panel in that mode, e.g. `.roomOrder` for the order list baseline.
+    init(miSession: MiSession? = nil, roomCount: Int? = nil, editMode: PanelEditMode = .none) async throws {
+        previousLanguage = L10n.currentLanguage
+        L10n.currentLanguage = .zhHans
+        previousAppearance = UserDefaults.standard.string(forKey: AppAppearance.storageKey)
+        previousTemperatureUnit = UserDefaults.standard.string(forKey: TemperatureUnitPreference.storageKey)
+        // The panel reads room order/aliases through `@AppStorage` on `.standard`, i.e. the real
+        // developer's preferences. Save them and hand the renderer a deterministic empty value —
+        // clearing without restoring would wipe a developer's own room layout on every test run.
+        previousRoomOrder = UserDefaults.standard.string(forKey: RoomPrefs.orderKey)
+        previousRoomAliases = UserDefaults.standard.string(forKey: RoomPrefs.aliasesKey)
+        UserDefaults.standard.set(AppAppearance.system.rawValue, forKey: AppAppearance.storageKey)
+        UserDefaults.standard.set(TemperatureUnitPreference.celsius.rawValue, forKey: TemperatureUnitPreference.storageKey)
+        UserDefaults.standard.removeObject(forKey: RoomPrefs.orderKey)
+        UserDefaults.standard.removeObject(forKey: RoomPrefs.aliasesKey)
+        // The session state is a process-wide observable: a previous test's draft must not leak in.
+        LayoutUIState.shared.resetForTesting()
+
+        let suiteName = "MenuBarMijiaSnapshotTests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw MissingDefaults()
+        }
+        defaults.set(true, forKey: "has_completed_onboarding")
+        defaults.set(AppLanguagePreference.zhHans.rawValue, forKey: "app_language")
+        defaults.set(TemperatureUnitPreference.celsius.rawValue, forKey: TemperatureUnitPreference.storageKey)
+        // The panel's `.task` checks for updates; keep the snapshot offline and deterministic.
+        defaults.set(false, forKey: "automatically_checks_for_updates")
+        if let miSession {
+            defaults.set(HomeBackend.xiaomiCloud.rawValue, forKey: "home_backend")
+            guard MiSessionStore.save(miSession, defaults: defaults) else { throw MissingDefaults() }
+        }
+
+        store = HomeStore(
+            provider: MockHomeProvider(snapshot: Self.home(roomCount: roomCount)),
+            defaultsSuiteName: suiteName
+        )
+
+        var attempts = 0
+        while store.devices.isEmpty && attempts < 200 {
+            try await Task.sleep(for: .milliseconds(20))
+            attempts += 1
+        }
+        #expect(!store.devices.isEmpty, "MockHomeProvider should deliver a snapshot right away")
+
+        if editMode == .roomOrder {
+            LayoutUIState.shared.beginRoomOrder(
+                rooms: store.rooms,
+                order: RoomPrefs.storedOrder(),
+                aliases: RoomPrefs.decodeAliases(UserDefaults.standard.string(forKey: RoomPrefs.aliasesKey) ?? "{}")
+            )
+        }
+    }
+
+    /// The demo home with its three rooms replaced by `roomCount` rooms; devices are spread over
+    /// them so the list shows more than "0 台" on every row.
+    private static func home(roomCount: Int?) -> SynthesizedHome {
+        var home = DemoHomeProvider.defaultHome(includeCamera: false)
+        guard let roomCount, roomCount > 0 else { return home }
+        let names = [
+            "客厅", "主卧", "书房", "儿童房", "厨房", "餐厅", "阳台", "玄关",
+            "卫生间", "次卧", "客房", "衣帽间", "储物间", "影音室", "健身房", "阁楼"
+        ]
+        let rooms = (0..<roomCount).map { index in
+            RoomArea(
+                id: "room_\(index)",
+                name: index < names.count ? names[index] : "房间 \(index + 1)",
+                sortOrder: index
+            )
+        }
+        home.rooms = rooms
+        home.devices = home.devices.enumerated().map { index, device in
+            var device = device
+            let room = rooms[index % rooms.count]
+            device.roomId = room.id
+            device.roomName = room.name
+            return device
+        }
+        return home
+    }
+
+    func restore() {
+        if let previousAppearance {
+            UserDefaults.standard.set(previousAppearance, forKey: AppAppearance.storageKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: AppAppearance.storageKey)
+        }
+        L10n.currentLanguage = previousLanguage
+        if let previousTemperatureUnit {
+            UserDefaults.standard.set(previousTemperatureUnit, forKey: TemperatureUnitPreference.storageKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: TemperatureUnitPreference.storageKey)
+        }
+        // Put the developer's real room preferences back, byte for byte.
+        if let previousRoomOrder {
+            UserDefaults.standard.set(previousRoomOrder, forKey: RoomPrefs.orderKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: RoomPrefs.orderKey)
+        }
+        if let previousRoomAliases {
+            UserDefaults.standard.set(previousRoomAliases, forKey: RoomPrefs.aliasesKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: RoomPrefs.aliasesKey)
+        }
+        LayoutUIState.shared.resetForTesting()
+    }
+}
+
+/// Brings the offscreen window the snapshot harness captures into its final state.
+@MainActor
+enum SnapshotWindow {
+    /// An offscreen borderless window in which no control can hold keyboard focus (#351). SwiftUI may
+    /// hand focus to the first focusable control (the header mic button) on any later run-loop pass,
+    /// so clearing focus once before the capture (#323) still let a focus ring into CI baselines.
+    static func make(size: CGSize) -> NSWindow {
+        let window = CaptureWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    private final class CaptureWindow: NSWindow {
+        override var canBecomeKey: Bool { false }
+        override var canBecomeMain: Bool { false }
+
+        override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+            super.makeFirstResponder(nil)
+        }
+    }
+
+    /// Takes keyboard focus away, then lays the window out and draws it, so a ring drawn for an earlier
+    /// focus is repainted before the capture (#323). Call it immediately before `cacheDisplay`.
+    static func prepareForCapture(_ window: NSWindow) {
+        window.makeFirstResponder(nil)
+        window.layoutIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.contentView?.displayIfNeeded()
+        window.displayIfNeeded()
+        window.makeFirstResponder(nil)
+    }
+}
