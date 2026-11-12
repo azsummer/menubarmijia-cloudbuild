@@ -1,0 +1,50 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+
+      - name: Build app
+        run: |
+          chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
+          bash scripts/build_app.sh
+
+      - name: Package zip
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent MenuBarMijia.app MenuBarMijia-1.1.7-macos.zip
+          shasum -a 256 MenuBarMijia-1.1.7-macos.zip | tee sha256.txt
+          lipo -archs MenuBarMijia.app/Contents/MacOS/MenuBarMijiaApp || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MenuBarMijia-app
+          path: |
+            MenuBarMijia-1.1.7-macos.zip
+            sha256.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete cloudbuild-v1.1.7 --yes --cleanup-tag || true
+          gh release create cloudbuild-v1.1.7 \
+            MenuBarMijia-1.1.7-macos.zip sha256.txt \
+            --title "MenuBarMijia 1.1.7 (cloud build)" \
+            --notes "Unsigned ad-hoc build compiled from the MIT source of jryang1997/MenuBarMijia via GitHub Actions (macos-26). Build source: gitcode mirror of upstream v1.1.7."
