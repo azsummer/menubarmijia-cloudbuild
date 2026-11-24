@@ -1,3 +1,6 @@
+> [!NOTE]
+> **Upstream project moved & renamed:** The original `jryang1997/MenuBarMijia` repository is no longer available. Official development has moved to **[jryang2026-code/MenuBarHome](https://github.com/jryang2026-code/MenuBarHome)** (latest release: [Releases](https://github.com/jryang2026-code/MenuBarHome/releases/latest)).
+
 English | [简体中文](README.zh-CN.md)
 
 <p align="center">
