@@ -1,3 +1,6 @@
+> [!NOTE]
+> **上游官方仓库已改名并迁移：** 原 `jryang1997/MenuBarMijia` 账号已停用，官方项目已更名为 **MenuBarHome** 并迁至 **[jryang2026-code/MenuBarHome](https://github.com/jryang2026-code/MenuBarHome)** 持续维护（最新版本请见 [Releases](https://github.com/jryang2026-code/MenuBarHome/releases/latest)）。
+
 [English](README.md) | 简体中文
 
 <p align="center">
